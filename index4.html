@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Размещение объекта — Three.js WebXR</title>
+    <style>
+      html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; font-family: Arial, sans-serif; background: #101827; }
+      #status { position: fixed; z-index: 2; top: 12px; left: 12px; right: 12px; padding: 10px 14px; border-radius: 10px; background: #111827d9; color: white; text-align: center; font-size: 14px; }
+      #start { position: fixed; z-index: 3; inset: auto 16px 26px; padding: 14px; border: 0; border-radius: 12px; background: #2563eb; color: white; font-size: 17px; font-weight: 700; }
+      #start:disabled { opacity: .6; }
+    </style>
+  </head>
+  <body>
+    <div id="status">Нажмите «Начать AR», затем наведите маркер на плоскость и коснитесь экрана.</div>
+    <button id="start" type="button">Начать AR</button>
+    <script type="module">
+      import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js';
+      import { ARButton } from 'https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/webxr/ARButton.js';
+
+      const status = document.querySelector('#status');
+      const start = document.querySelector('#start');
+      const scene = new THREE.Scene();
+      const camera = new THREE.PerspectiveCamera();
+      const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.xr.enabled = true;
+      renderer.xr.setReferenceSpaceType('local-floor');
+      document.body.appendChild(renderer.domElement);
+
+      scene.add(new THREE.HemisphereLight(0xffffff, 0x667788, 2));
+      const light = new THREE.DirectionalLight(0xffffff, 2);
+      light.position.set(1, 3, 2);
+      scene.add(light);
+
+      // The ring follows the current hit-test result until the object is placed.
+      const marker = new THREE.Mesh(
+        new THREE.RingGeometry(0.10, 0.14, 32),
+        new THREE.MeshBasicMaterial({ color: 0x38bdf8, side: THREE.DoubleSide })
+      );
+      marker.rotation.x = -Math.PI / 2;
+      marker.matrixAutoUpdate = false;
+      marker.visible = false;
+      scene.add(marker);
+
+      const placedObjects = [];
+      const geometry = new THREE.BoxGeometry(0.18, 0.18, 0.18);
+      const material = new THREE.MeshStandardMaterial({ color: 0xf97316, roughness: 0.55, metalness: 0.05 });
+      let hitTestSource = null;
+      let viewerSpace = null;
+      let hitMatrix = null;
+
+      const arButton = ARButton.createButton(renderer, {
+        requiredFeatures: ['hit-test', 'local-floor'],
+        optionalFeatures: ['dom-overlay'],
+        domOverlay: { root: document.body }
+      });
+      arButton.style.display = 'none';
+      document.body.appendChild(arButton);
+
+      start.addEventListener('click', () => arButton.click());
+      renderer.xr.addEventListener('sessionstart', async () => {
+        start.disabled = true;
+        start.textContent = 'AR запущен';
+        status.textContent = 'Наведите кольцо на пол или стол. Коснитесь экрана, чтобы поставить куб.';
+        const session = renderer.xr.getSession();
+        try {
+          viewerSpace = await session.requestReferenceSpace('viewer');
+          hitTestSource = await session.requestHitTestSource({ space: viewerSpace });
+          session.addEventListener('end', () => {
+            hitTestSource?.cancel();
+            hitTestSource = null;
+            marker.visible = false;
+            start.disabled = false;
+            start.textContent = 'Начать AR';
+            status.textContent = 'Сессия завершена. Для повторного запуска нажмите кнопку.';
+          }, { once: true });
+        } catch (error) {
+          status.textContent = `Не удалось включить поиск плоскостей: ${error.message}`;
+        }
+      });
+
+      renderer.xr.addEventListener('sessionend', () => {
+        marker.visible = false;
+        hitTestSource = null;
+      });
+
+      renderer.xr.addEventListener('sessionstart', () => {
+        renderer.xr.getSession().addEventListener('select', placeObject);
+      });
+
+      function placeObject() {
+        if (!hitMatrix) return;
+        const cube = new THREE.Mesh(geometry, material);
+        cube.matrix.copy(hitMatrix);
+        cube.matrix.decompose(cube.position, cube.quaternion, cube.scale);
+        cube.position.y += 0.09;
+        cube.matrixAutoUpdate = true;
+        scene.add(cube);
+        placedObjects.push(cube);
+      }
+
+      renderer.setAnimationLoop((time, frame) => {
+        if (frame && hitTestSource) {
+          const results = frame.getHitTestResults(hitTestSource);
+          if (results.length) {
+            const pose = results[0].getPose(renderer.xr.getReferenceSpace());
+            hitMatrix = new THREE.Matrix4().fromArray(pose.transform.matrix);
+            marker.matrix.copy(hitMatrix);
+            marker.visible = true;
+          } else {
+            hitMatrix = null;
+            marker.visible = false;
+          }
+        }
+        renderer.render(scene, camera);
+      });
+
+      window.addEventListener('resize', () => {
+        renderer.setSize(window.innerWidth, window.innerHeight);
+      });
+    </script>
+  </body>
+</html>
