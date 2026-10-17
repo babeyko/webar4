@@ -3,241 +3,307 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <title>Размещение объекта — Three.js WebXR</title>
+    <meta name="theme-color" content="#101827" />
+    <title>Размещение объекта — Three.js WebXR Hit Test</title>
     <style>
-      html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; font-family: Arial, sans-serif; background: #101827; }
-      #status { position: fixed; z-index: 2; top: 12px; left: 12px; right: 12px; padding: 10px 14px; border-radius: 10px; background: #111827d9; color: white; text-align: center; font-size: 14px; }
-      #start { position: fixed; z-index: 3; inset: auto 16px 26px; padding: 14px; border: 0; border-radius: 12px; background: #2563eb; color: white; font-size: 17px; font-weight: 700; }
-      #start:disabled { opacity: .6; }
-      #log { position: fixed; z-index: 2; left: 8px; right: 8px; top: 64px; max-height: 45vh; overflow: hidden; margin: 0;
-             padding: 6px; font: 11px/1.3 monospace; color: #0f0; background: rgba(0,0,0,.6); white-space: pre-wrap; pointer-events: none; }
+      * { box-sizing: border-box; }
+      html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: #101827; font-family: Arial, sans-serif; }
+      canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+      #panel {
+        position: fixed; z-index: 2; top: max(12px, env(safe-area-inset-top)); left: 12px; right: 12px;
+        padding: 12px; border-radius: 12px; color: #fff; text-align: center;
+        background: rgba(17, 24, 39, .86); box-shadow: 0 4px 18px #0004;
+      }
+      #status { margin: 0; font-size: 15px; line-height: 1.4; }
+      #start {
+        position: fixed; z-index: 3; inset: auto 20px max(22px, env(safe-area-inset-bottom));
+        padding: 14px; border: 0; border-radius: 12px; background: #2563eb; color: #fff;
+        font-size: 17px; font-weight: 700; touch-action: manipulation;
+      }
+      #start:disabled { opacity: .65; }
+      #debugToggle {
+        position: fixed; z-index: 4; right: 12px; bottom: max(86px, calc(env(safe-area-inset-bottom) + 76px));
+        border: 0; border-radius: 8px; padding: 8px 10px; background: #111827d9; color: #fff; font-size: 12px;
+      }
+      #log {
+        position: fixed; z-index: 3; left: 8px; right: 8px; top: 65px; max-height: 32vh; overflow: auto;
+        margin: 0; padding: 8px; border-radius: 8px; background: rgba(0, 0, 0, .72); color: #6dff62;
+        font: 12px/1.4 monospace; white-space: pre-wrap; pointer-events: none;
+      }
+      [hidden] { display: none !important; }
     </style>
   </head>
   <body>
-    <div id="status">Нажмите «Начать AR», затем наведите маркер на плоскость и коснитесь экрана.</div>
-    <pre id="log"></pre>
+    <section id="panel" aria-live="polite">
+      <p id="status">Нажмите «Начать AR», затем медленно наведите камеру на хорошо освещённый пол или стол.</p>
+    </section>
+    <pre id="log" hidden></pre>
+    <button id="debugToggle" type="button">Показать журнал</button>
     <button id="start" type="button">Начать AR</button>
+
     <script type="module">
-      const DEBUG = true; // false — спрятать лог
-
-      const logEl = document.querySelector('#log');
-      if (!DEBUG) logEl.style.display = 'none';
-      const lines = [];
-      const log = m => { lines.push(new Date().toISOString().slice(11, 19) + ' ' + m); logEl.textContent = lines.slice(-20).join('\n'); };
-      window.addEventListener('error', e => log('ERROR: ' + e.message));
-      window.addEventListener('unhandledrejection', e => log('REJECT: ' + (e.reason?.message || e.reason)));
-
-      log('UA: ' + navigator.userAgent);
-
-      const THREE = await import('https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js');
-
       const statusEl = document.querySelector('#status');
-      const start = document.querySelector('#start');
+      const startButton = document.querySelector('#start');
+      const debugToggle = document.querySelector('#debugToggle');
+      const logEl = document.querySelector('#log');
+      const DEBUG = true;
+      const logLines = [];
       let lastStatus = '';
-      const setStatus = t => { if (t !== lastStatus) { statusEl.textContent = t; lastStatus = t; } };
+      const log = (message) => {
+        if (!DEBUG) return;
+        logLines.push(`${new Date().toLocaleTimeString('ru-RU')} ${message}`);
+        logEl.textContent = logLines.slice(-12).join('\n');
+      };
+      const setStatus = (message) => {
+        if (message !== lastStatus) {
+          statusEl.textContent = message;
+          lastStatus = message;
+        }
+      };
 
-      // --- Проверка поддержки WebXR AR ---
-      if (!navigator.xr) {
-        log('navigator.xr отсутствует → браузер не поддерживает WebXR');
-        setStatus('WebXR не поддерживается. Откройте страницу в Chrome.');
-        start.disabled = true;
+      debugToggle.addEventListener('click', () => {
+        logEl.hidden = !logEl.hidden;
+        debugToggle.textContent = logEl.hidden ? 'Показать журнал' : 'Скрыть журнал';
+      });
+
+      window.addEventListener('error', (event) => log(`ОШИБКА: ${event.message}`));
+      window.addEventListener('unhandledrejection', (event) => log(`ОТКЛОНЕНО: ${event.reason?.message || event.reason}`));
+
+      let THREE;
+      try {
+        THREE = await import('https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js');
+      } catch (error) {
+        setStatus('Не удалось загрузить Three.js. Проверьте интернет и обновите страницу.');
+        log(`Three.js: ${error.message}`);
+        startButton.disabled = true;
+        throw error;
+      }
+
+      if (!window.isSecureContext) {
+        setStatus('WebXR работает только на защищённой странице HTTPS или localhost.');
+        startButton.disabled = true;
+      } else if (!navigator.xr) {
+        setStatus('Браузер не предоставляет WebXR. Откройте страницу в Chrome на Android с поддержкой AR.');
+        startButton.disabled = true;
       } else {
-        const ok = await navigator.xr.isSessionSupported('immersive-ar').catch(e => (log('isSessionSupported: ' + e.message), false));
-        log('immersive-ar: ' + (ok ? 'поддерживается' : 'НЕ поддерживается'));
-        if (!ok) {
-          setStatus('AR-режим недоступен. Нужен Chrome и «Сервисы Google Play для AR».');
-          start.disabled = true;
+        const supported = await navigator.xr.isSessionSupported('immersive-ar').catch((error) => {
+          log(`Проверка immersive-ar: ${error.message}`);
+          return false;
+        });
+        log(`immersive-ar: ${supported ? 'поддерживается' : 'не поддерживается'}`);
+        if (!supported) {
+          setStatus('AR-режим недоступен. Нужны совместимый Android-телефон, Chrome и сервисы Google Play для AR.');
+          startButton.disabled = true;
         }
       }
 
       const scene = new THREE.Scene();
       const camera = new THREE.PerspectiveCamera();
       const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
-      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
       renderer.setSize(window.innerWidth, window.innerHeight);
       renderer.xr.enabled = true;
-      // 'local' вместо 'local-floor': высота пола не нужна, её даёт хит-тест,
-      // а local-floor на части устройств не выдаётся и сессия не стартует.
-      renderer.xr.setReferenceSpaceType('local');
       document.body.appendChild(renderer.domElement);
 
-      scene.add(new THREE.HemisphereLight(0xffffff, 0x667788, 2));
-      const light = new THREE.DirectionalLight(0xffffff, 2);
+      scene.add(new THREE.HemisphereLight(0xffffff, 0x718096, 2));
+      const light = new THREE.DirectionalLight(0xffffff, 1.5);
       light.position.set(1, 3, 2);
       scene.add(light);
 
-      // Поворот кольца — в геометрии: matrix меша перезаписывается позой хит-теста.
+      // Geometry is horizontal in its local space; the hit-test pose positions it on the surface.
       const marker = new THREE.Mesh(
-        new THREE.RingGeometry(0.10, 0.14, 32).rotateX(-Math.PI / 2),
-        new THREE.MeshBasicMaterial({ color: 0x38bdf8, side: THREE.DoubleSide })
+        new THREE.RingGeometry(0.10, 0.14, 48).rotateX(-Math.PI / 2),
+        new THREE.MeshBasicMaterial({ color: 0x38bdf8, side: THREE.DoubleSide, depthTest: false })
       );
       marker.matrixAutoUpdate = false;
+      marker.renderOrder = 10;
       marker.visible = false;
       scene.add(marker);
 
-      const geometry = new THREE.BoxGeometry(0.18, 0.18, 0.18);
-      const material = new THREE.MeshStandardMaterial({ color: 0xf97316, roughness: 0.55, metalness: 0.05 });
+      const cubeGeometry = new THREE.BoxGeometry(0.18, 0.18, 0.18);
+      const cubeMaterial = new THREE.MeshStandardMaterial({ color: 0xf97316, roughness: 0.65, metalness: 0.02 });
+      const placedObjects = [];
+      const identityScale = new THREE.Vector3(1, 1, 1);
+      const position = new THREE.Vector3();
+      const orientation = new THREE.Quaternion();
+      const scale = new THREE.Vector3();
 
-      let hitTestSource = null;
-      let lastHit = null;
-      let missFrames = 0;
-      let pendingPlace = false;
-      const placed = [];
+      let session = null;
+      let referenceSpace = null;
+      let planeHitSource = null;
+      let pointHitSource = null;
+      let lastHitMatrix = null;
+      let pendingPlacement = false;
+      let frames = 0;
+      let planeHitFrames = 0;
+      let pointHitFrames = 0;
+      let statTime = performance.now();
 
-      const markerPos = new THREE.Vector3();
-      const markerQuat = new THREE.Quaternion();
-      let hasMarkerPose = false;
-      const ONE = new THREE.Vector3(1, 1, 1);
-      const _p = new THREE.Vector3(), _q = new THREE.Quaternion(), _s = new THREE.Vector3(), _up = new THREE.Vector3();
+      function releaseHitSources() {
+        planeHitSource?.cancel();
+        pointHitSource?.cancel();
+        planeHitSource = null;
+        pointHitSource = null;
+      }
 
-      // Статистика для лога
-      let statFrames = 0, statAnyHits = 0, statFloorHits = 0, statLost = 0, statT = performance.now();
+      async function startAR() {
+        if (!navigator.xr || startButton.disabled) return;
+        startButton.disabled = true;
+        setStatus('Запускаем AR. Если браузер спросит разрешение, подтвердите его.');
 
-      // --- Запуск сессии вручную, с ловлей ошибок ---
-      start.addEventListener('click', async () => {
-        start.disabled = true;
         try {
-          const session = await navigator.xr.requestSession('immersive-ar', {
+          session = await navigator.xr.requestSession('immersive-ar', {
             requiredFeatures: ['hit-test'],
-            optionalFeatures: ['dom-overlay', 'anchors', 'plane-detection'],
+            optionalFeatures: ['local-floor', 'dom-overlay', 'plane-detection', 'anchors'],
             domOverlay: { root: document.body }
           });
-          log('сессия запущена, features: ' + (session.enabledFeatures ? [...session.enabledFeatures].join(', ') : 'n/a'));
-          session.addEventListener('end', onSessionEnd);
-          session.addEventListener('select', () => { pendingPlace = true; });
+          session.addEventListener('end', endAR, { once: true });
+          log(`Сессия AR запущена${session.enabledFeatures ? `; функции: ${[...session.enabledFeatures].join(', ')}` : ''}`);
+
+          // Use floor coordinates where available, then fall back to the device's local origin.
+          let spaceType = 'local-floor';
+          try {
+            referenceSpace = await session.requestReferenceSpace(spaceType);
+          } catch (floorError) {
+            log(`local-floor недоступен: ${floorError.message}; используем local`);
+            spaceType = 'local';
+            referenceSpace = await session.requestReferenceSpace(spaceType);
+          }
+          renderer.xr.setReferenceSpaceType(spaceType);
           await renderer.xr.setSession(session);
 
           const viewerSpace = await session.requestReferenceSpace('viewer');
-          hitTestSource = await session.requestHitTestSource({ space: viewerSpace });
-          log('hit-test source создан');
-          start.textContent = 'AR запущен';
-        } catch (e) {
-          log('ОШИБКА запуска: ' + e.name + ': ' + e.message);
-          setStatus('Не удалось запустить AR: ' + e.message);
-          start.disabled = false;
-        }
-      });
-
-      function onSessionEnd() {
-        hitTestSource?.cancel?.();
-        hitTestSource = null;
-        lastHit = null;
-        hasMarkerPose = false;
-        marker.visible = false;
-        for (const p of placed) scene.remove(p.group);
-        placed.length = 0;
-        start.disabled = false;
-        start.textContent = 'Начать AR';
-        setStatus('Сессия завершена. Для повторного запуска нажмите кнопку.');
-        log('сессия завершена');
-      }
-
-      // Только горизонтальные поверхности, смотрящие вверх (пол, стол).
-      function pickFloorHit(results, refSpace) {
-        for (const r of results) {
-          const pose = r.getPose(refSpace);
-          if (!pose) continue;
-          const m = new THREE.Matrix4().fromArray(pose.transform.matrix);
-          _up.setFromMatrixColumn(m, 1).normalize();
-          if (_up.y > 0.9) return { result: r, matrix: m };
-        }
-        return null;
-      }
-
-      function updateMarker(m) {
-        m.decompose(_p, _q, _s);
-        if (!hasMarkerPose || markerPos.distanceTo(_p) > 0.3) {
-          markerPos.copy(_p); markerQuat.copy(_q); hasMarkerPose = true;
-        } else {
-          markerPos.lerp(_p, 0.35); markerQuat.slerp(_q, 0.35);
-        }
-        marker.matrix.compose(markerPos, markerQuat, ONE);
-        marker.visible = true;
-      }
-
-      function placeObject(hit, frame, refSpace) {
-        const group = new THREE.Group();
-        group.matrixAutoUpdate = false;
-        group.matrix.copy(marker.matrix);
-        const cube = new THREE.Mesh(geometry, material);
-        cube.position.y = 0.09;
-        group.add(cube);
-        scene.add(group);
-
-        const entry = { group, anchor: null };
-        placed.push(entry);
-        log('куб #' + placed.length + ' поставлен');
-
-        let promise = null;
-        try {
-          if (missFrames === 0 && hit.result.createAnchor) {
-            promise = hit.result.createAnchor();
-          } else if (frame.createAnchor) {
-            marker.matrix.decompose(_p, _q, _s);
-            promise = frame.createAnchor(
-              new XRRigidTransform({ x: _p.x, y: _p.y, z: _p.z }, { x: _q.x, y: _q.y, z: _q.z, w: _q.w }),
-              refSpace
-            );
+          // Plane hits are preferred; point hits are a fallback on devices that need more time to map a plane.
+          planeHitSource = await session.requestHitTestSource({ space: viewerSpace, entityTypes: ['plane'] });
+          try {
+            pointHitSource = await session.requestHitTestSource({ space: viewerSpace, entityTypes: ['point'] });
+            log('Источник поиска точек создан для запасного варианта');
+          } catch (pointError) {
+            log(`Поиск точек недоступен: ${pointError.message}`);
           }
-        } catch (e) { log('якорь: ' + e.message); }
-        promise?.then(a => { entry.anchor = a; log('якорь создан'); }).catch(e => log('якорь: ' + e.message));
+
+          session.addEventListener('select', () => { pendingPlacement = true; });
+          startButton.textContent = 'AR запущен';
+          setStatus('Медленно поводите телефоном над поверхностью. Когда появится кольцо, коснитесь экрана.');
+        } catch (error) {
+          log(`Ошибка запуска: ${error.name}: ${error.message}`);
+          setStatus(`Не удалось запустить AR: ${error.message || error.name}. Проверьте поддержку hit-test и повторите попытку.`);
+          releaseHitSources();
+          referenceSpace = null;
+          lastHitMatrix = null;
+          if (session) {
+            const failedSession = session;
+            session = null;
+            await failedSession.end().catch(() => {});
+          }
+          startButton.disabled = false;
+          startButton.textContent = 'Начать AR';
+        }
+      }
+
+      function endAR() {
+        releaseHitSources();
+        session = null;
+        referenceSpace = null;
+        lastHitMatrix = null;
+        pendingPlacement = false;
+        marker.visible = false;
+        for (const object of placedObjects) scene.remove(object);
+        placedObjects.length = 0;
+        startButton.disabled = false;
+        startButton.textContent = 'Начать AR';
+        setStatus('Сессия завершена. Нажмите «Начать AR», чтобы запустить снова.');
+        log('Сессия завершена');
+      }
+
+      function applyHit(result, frame, sourceKind) {
+        const pose = result?.getPose(referenceSpace);
+        if (!pose) return false;
+        const matrix = new THREE.Matrix4().fromArray(pose.transform.matrix);
+
+        // Point hits do not always provide a useful surface normal, so align their marker with the floor.
+        if (sourceKind === 'point') {
+          matrix.decompose(position, orientation, scale);
+          orientation.identity();
+          matrix.compose(position, orientation, identityScale);
+        }
+
+        marker.matrix.copy(matrix);
+        marker.visible = true;
+        lastHitMatrix = matrix.clone();
+        return true;
+      }
+
+      function placeCube() {
+        if (!lastHitMatrix) {
+          log('Тап получен, но попадания пока нет; куб не поставлен');
+          setStatus('Поверхность ещё не найдена. Медленно поводите телефоном и дождитесь кольца.');
+          return;
+        }
+        const object = new THREE.Group();
+        object.matrixAutoUpdate = false;
+        object.matrix.copy(lastHitMatrix);
+        const cube = new THREE.Mesh(cubeGeometry, cubeMaterial);
+        cube.position.y = 0.09;
+        object.add(cube);
+        scene.add(object);
+        placedObjects.push(object);
+        log(`Куб ${placedObjects.length} закреплён в мировой системе координат`);
+        setStatus('Куб размещён. Он останется на поверхности при движении телефона; коснитесь снова, чтобы поставить ещё один.');
       }
 
       renderer.setAnimationLoop((time, frame) => {
-        if (frame) {
-          const refSpace = renderer.xr.getReferenceSpace();
-          const viewerPose = frame.getViewerPose(refSpace);
-          const lost = !viewerPose || viewerPose.emulatedPosition;
+        if (frame && session && referenceSpace) {
+          frames++;
+          let placedMarker = false;
 
-          if (hitTestSource) {
-            const results = frame.getHitTestResults(hitTestSource);
-            const hit = pickFloorHit(results, refSpace);
-            statFrames++;
-            if (results.length) statAnyHits++;
-            if (hit) statFloorHits++;
-            if (lost) statLost++;
-
-            if (hit) {
-              missFrames = 0;
-              lastHit = hit;
-              updateMarker(hit.matrix);
-            } else if (++missFrames > 10) {
-              lastHit = null;
-              hasMarkerPose = false;
-              marker.visible = false;
+          if (planeHitSource) {
+            const planeResults = frame.getHitTestResults(planeHitSource);
+            if (planeResults.length) {
+              planeHitFrames++;
+              placedMarker = applyHit(planeResults[0], frame, 'plane');
             }
           }
 
-          if (pendingPlace) {
-            pendingPlace = false;
-            if (lastHit) placeObject(lastHit, frame, refSpace);
-            else log('тап без плоскости — куб не поставлен');
+          if (!placedMarker && pointHitSource) {
+            const pointResults = frame.getHitTestResults(pointHitSource);
+            if (pointResults.length) {
+              pointHitFrames++;
+              placedMarker = applyHit(pointResults[0], frame, 'point');
+            }
           }
 
-          for (const p of placed) {
-            if (!p.anchor) continue;
-            const pose = frame.getPose(p.anchor.anchorSpace, refSpace);
-            if (pose) { p.group.matrix.fromArray(pose.transform.matrix); p.group.visible = true; }
-            else p.group.visible = false;
+          if (!placedMarker) {
+            lastHitMatrix = null;
+            marker.visible = false;
+          }
+
+          if (pendingPlacement) {
+            pendingPlacement = false;
+            placeCube();
           }
 
           const now = performance.now();
-          if (DEBUG && now - statT > 2000) {
-            const planes = frame.detectedPlanes ? ', плоскостей ' + frame.detectedPlanes.size : '';
-            log(`кадров ${statFrames}, хитов ${statAnyHits}, по полу ${statFloorHits}, трекинг потерян ${statLost}${planes}`);
-            statFrames = statAnyHits = statFloorHits = statLost = 0;
-            statT = now;
+          if (DEBUG && now - statTime >= 2000) {
+            const planes = frame.detectedPlanes ? `, плоскостей ${frame.detectedPlanes.size}` : '';
+            log(`кадров ${frames}, плоскостных попаданий ${planeHitFrames}, точечных ${pointHitFrames}${planes}`);
+            frames = planeHitFrames = pointHitFrames = 0;
+            statTime = now;
           }
 
-          if (lost) setStatus('Трекинг потерян. Наведите камеру на освещённую поверхность с текстурой.');
-          else if (marker.visible) setStatus('Коснитесь экрана, чтобы поставить куб.');
-          else setStatus('Медленно поводите телефоном над полом, пока не появится кольцо.');
+          if (marker.visible) setStatus('Поверхность найдена. Коснитесь экрана, чтобы поставить куб.');
+          else setStatus('Медленно перемещайте телефон над освещённой поверхностью с заметной текстурой.');
         }
         renderer.render(scene, camera);
       });
 
+      startButton.addEventListener('click', startAR);
       window.addEventListener('resize', () => {
-        if (!renderer.xr.isPresenting) renderer.setSize(window.innerWidth, window.innerHeight);
+        if (!renderer.xr.isPresenting) {
+          renderer.setSize(window.innerWidth, window.innerHeight);
+          camera.aspect = window.innerWidth / window.innerHeight;
+          camera.updateProjectionMatrix();
+        }
       });
     </script>
   </body>
