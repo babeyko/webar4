@@ -18,8 +18,11 @@
       import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js';
       import { ARButton } from 'https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/webxr/ARButton.js';
 
-      const status = document.querySelector('#status');
+      const statusEl = document.querySelector('#status');
       const start = document.querySelector('#start');
+      let lastStatus = '';
+      const setStatus = t => { if (t !== lastStatus) { statusEl.textContent = t; lastStatus = t; } };
+
       const scene = new THREE.Scene();
       const camera = new THREE.PerspectiveCamera();
       const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
@@ -34,85 +37,151 @@
       light.position.set(1, 3, 2);
       scene.add(light);
 
-      // The ring follows the current hit-test result until the object is placed.
+      // Кольцо поворачиваем на уровне ГЕОМЕТРИИ: matrix меша перезаписывается позой хит-теста,
+      // поэтому mesh.rotation игнорировался и кольцо стояло вертикально.
       const marker = new THREE.Mesh(
-        new THREE.RingGeometry(0.10, 0.14, 32),
+        new THREE.RingGeometry(0.10, 0.14, 32).rotateX(-Math.PI / 2),
         new THREE.MeshBasicMaterial({ color: 0x38bdf8, side: THREE.DoubleSide })
       );
-      marker.rotation.x = -Math.PI / 2;
       marker.matrixAutoUpdate = false;
       marker.visible = false;
       scene.add(marker);
 
-      const placedObjects = [];
       const geometry = new THREE.BoxGeometry(0.18, 0.18, 0.18);
       const material = new THREE.MeshStandardMaterial({ color: 0xf97316, roughness: 0.55, metalness: 0.05 });
+
       let hitTestSource = null;
-      let viewerSpace = null;
-      let hitMatrix = null;
+      let lastHit = null;        // { result, matrix }
+      let missFrames = 0;        // сколько кадров подряд нет попадания
+      let pendingPlace = false;  // тап пришёл — ставим в ближайшем кадре
+      const placed = [];         // { group, anchor }
+
+      const markerPos = new THREE.Vector3();
+      const markerQuat = new THREE.Quaternion();
+      let hasMarkerPose = false;
+      const ONE = new THREE.Vector3(1, 1, 1);
+      const _p = new THREE.Vector3(), _q = new THREE.Quaternion(), _s = new THREE.Vector3(), _up = new THREE.Vector3();
 
       const arButton = ARButton.createButton(renderer, {
         requiredFeatures: ['hit-test', 'local-floor'],
-        optionalFeatures: ['dom-overlay'],
+        optionalFeatures: ['dom-overlay', 'anchors'],
         domOverlay: { root: document.body }
       });
       arButton.style.display = 'none';
       document.body.appendChild(arButton);
-
       start.addEventListener('click', () => arButton.click());
+
       renderer.xr.addEventListener('sessionstart', async () => {
         start.disabled = true;
         start.textContent = 'AR запущен';
-        status.textContent = 'Наведите кольцо на пол или стол. Коснитесь экрана, чтобы поставить куб.';
         const session = renderer.xr.getSession();
+        session.addEventListener('select', () => { pendingPlace = true; });
         try {
-          viewerSpace = await session.requestReferenceSpace('viewer');
-          hitTestSource = await session.requestHitTestSource({ space: viewerSpace });
-          session.addEventListener('end', () => {
-            hitTestSource?.cancel();
-            hitTestSource = null;
-            marker.visible = false;
-            start.disabled = false;
-            start.textContent = 'Начать AR';
-            status.textContent = 'Сессия завершена. Для повторного запуска нажмите кнопку.';
-          }, { once: true });
+          const viewerSpace = await session.requestReferenceSpace('viewer');
+          hitTestSource = await session.requestHitTestSource({ space: viewerSpace, entityTypes: ['plane'] });
         } catch (error) {
-          status.textContent = `Не удалось включить поиск плоскостей: ${error.message}`;
+          setStatus(`Не удалось включить поиск плоскостей: ${error.message}`);
         }
       });
 
       renderer.xr.addEventListener('sessionend', () => {
-        marker.visible = false;
+        hitTestSource?.cancel?.();
         hitTestSource = null;
+        lastHit = null;
+        hasMarkerPose = false;
+        marker.visible = false;
+        for (const p of placed) scene.remove(p.group);
+        placed.length = 0;
+        start.disabled = false;
+        start.textContent = 'Начать AR';
+        setStatus('Сессия завершена. Для повторного запуска нажмите кнопку.');
       });
 
-      renderer.xr.addEventListener('sessionstart', () => {
-        renderer.xr.getSession().addEventListener('select', placeObject);
-      });
+      // Берём только горизонтальные поверхности, смотрящие вверх (пол, стол), а не стены.
+      function pickFloorHit(results, refSpace) {
+        for (const r of results) {
+          const pose = r.getPose(refSpace);
+          if (!pose) continue;
+          const m = new THREE.Matrix4().fromArray(pose.transform.matrix);
+          _up.setFromMatrixColumn(m, 1).normalize();
+          if (_up.y > 0.9) return { result: r, matrix: m };
+        }
+        return null;
+      }
 
-      function placeObject() {
-        if (!hitMatrix) return;
+      // Сглаживание дрожания кольца; при скачке > 30 см — сразу переносим.
+      function updateMarker(m) {
+        m.decompose(_p, _q, _s);
+        if (!hasMarkerPose || markerPos.distanceTo(_p) > 0.3) {
+          markerPos.copy(_p); markerQuat.copy(_q); hasMarkerPose = true;
+        } else {
+          markerPos.lerp(_p, 0.35); markerQuat.slerp(_q, 0.35);
+        }
+        marker.matrix.compose(markerPos, markerQuat, ONE);
+        marker.visible = true;
+      }
+
+      // Куб крепим к якорю: ARCore уточняет карту, и без якоря объекты «уплывают» с пола.
+      function placeObject(hit, frame, refSpace) {
+        const group = new THREE.Group();
+        group.matrixAutoUpdate = false;
+        group.matrix.copy(marker.matrix);
         const cube = new THREE.Mesh(geometry, material);
-        cube.matrix.copy(hitMatrix);
-        cube.matrix.decompose(cube.position, cube.quaternion, cube.scale);
-        cube.position.y += 0.09;
-        cube.matrixAutoUpdate = true;
-        scene.add(cube);
-        placedObjects.push(cube);
+        cube.position.y = 0.09; // вдоль нормали плоскости
+        group.add(cube);
+        scene.add(group);
+
+        const entry = { group, anchor: null };
+        placed.push(entry);
+
+        let promise = null;
+        try {
+          if (missFrames === 0 && hit.result.createAnchor) {
+            promise = hit.result.createAnchor(); // якорь, привязанный к плоскости
+          } else if (frame.createAnchor) {
+            marker.matrix.decompose(_p, _q, _s);
+            promise = frame.createAnchor(
+              new XRRigidTransform({ x: _p.x, y: _p.y, z: _p.z }, { x: _q.x, y: _q.y, z: _q.z, w: _q.w }),
+              refSpace
+            );
+          }
+        } catch (e) { console.warn('Якорь не создан:', e); }
+        promise?.then(a => { entry.anchor = a; }).catch(e => console.warn('Якорь не создан:', e));
       }
 
       renderer.setAnimationLoop((time, frame) => {
-        if (frame && hitTestSource) {
-          const results = frame.getHitTestResults(hitTestSource);
-          if (results.length) {
-            const pose = results[0].getPose(renderer.xr.getReferenceSpace());
-            hitMatrix = new THREE.Matrix4().fromArray(pose.transform.matrix);
-            marker.matrix.copy(hitMatrix);
-            marker.visible = true;
-          } else {
-            hitMatrix = null;
-            marker.visible = false;
+        if (frame) {
+          const refSpace = renderer.xr.getReferenceSpace();
+          const viewerPose = frame.getViewerPose(refSpace);
+
+          if (hitTestSource) {
+            const hit = pickFloorHit(frame.getHitTestResults(hitTestSource), refSpace);
+            if (hit) {
+              missFrames = 0;
+              lastHit = hit;
+              updateMarker(hit.matrix);
+            } else if (++missFrames > 10) { // ~150 мс держим последнее попадание
+              lastHit = null;
+              hasMarkerPose = false;
+              marker.visible = false;
+            }
           }
+
+          if (pendingPlace) {
+            pendingPlace = false;
+            if (lastHit) placeObject(lastHit, frame, refSpace);
+          }
+
+          for (const p of placed) {
+            if (!p.anchor) continue;
+            const pose = frame.getPose(p.anchor.anchorSpace, refSpace);
+            if (pose) { p.group.matrix.fromArray(pose.transform.matrix); p.group.visible = true; }
+            else p.group.visible = false;
+          }
+
+          if (!viewerPose || viewerPose.emulatedPosition) setStatus('Трекинг потерян. Наведите камеру на освещённую поверхность с текстурой.');
+          else if (marker.visible) setStatus('Коснитесь экрана, чтобы поставить куб.');
+          else setStatus('Медленно поводите телефоном над полом, пока не появится кольцо.');
         }
         renderer.render(scene, camera);
       });
